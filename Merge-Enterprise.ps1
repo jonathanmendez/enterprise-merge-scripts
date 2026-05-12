@@ -256,44 +256,61 @@ try {
     }
 
     # ----- step 6: release version swap -----
+    # Four files hold the version on release branches; on a fresh dot
+    # release they all land at xxx.0.y and need to be swapped to xxx.y.0.
     $versionChanged = $false
     if ($Branch -eq "release") {
-        $verPath     = Join-Path $repoRoot "browser/config/version.txt"
-        $verDispPath = Join-Path $repoRoot "browser/config/version_display.txt"
-        $ver         = (Get-Content $verPath -Raw).Trim()
+        $versionFiles = @(
+            "browser/config/version.txt",
+            "browser/config/version_display.txt",
+            "config/milestone.txt",
+            "mobile/android/version.txt"
+        )
+        $primaryPath = Join-Path $repoRoot $versionFiles[0]
+        $ver = (Get-Content $primaryPath -Raw).Trim()
         if ($ver -match '^(\d+)\.0\.(\d+)$') {
-            $major   = $matches[1]
-            $dot     = $matches[2]
-            $newVer  = "$major.$dot.0"
-            Write-Step "Release version pattern detected"
-            Write-Info "version.txt:         $ver  ->  $newVer"
-            $verDisp    = (Get-Content $verDispPath -Raw).Trim()
-            $newVerDisp = $verDisp
-            if ($verDisp -match '^(\d+)\.0\.(\d+)$') {
-                $newVerDisp = "$($matches[1]).$($matches[2]).0"
-                Write-Info "version_display.txt: $verDisp  ->  $newVerDisp"
+            $major  = $matches[1]
+            $dot    = $matches[2]
+            $newVer = "$major.$dot.0"
+            $verPattern = "(?m)^" + [regex]::Escape($ver) + "$"
+
+            $affected = @()
+            foreach ($rel in $versionFiles) {
+                $full = Join-Path $repoRoot $rel
+                if (-not (Test-Path $full)) {
+                    Write-Warn2 "Version file not found: $rel (skipping)"
+                    continue
+                }
+                if ((Get-Content $full -Raw) -match $verPattern) {
+                    $affected += $rel
+                }
             }
-            if ($DryRun) {
-                Write-Dry "would prompt for version swap; if confirmed, would write files and commit"
+
+            Write-Step "Release version pattern detected"
+            Write-Info "$ver  ->  $newVer"
+            Write-Info "Files containing '$ver' on its own line:"
+            foreach ($f in $affected) { Write-Info "  $f" }
+
+            if ($affected.Count -eq 0) {
+                Write-Warn2 "No version files contain '$ver' on its own line; skipping swap."
+            } elseif ($DryRun) {
+                Write-Dry "would prompt for version swap; if confirmed, would rewrite $($affected.Count) file(s) and commit"
             } else {
-                $ans = Read-Host "Apply swap? [y/N]"
+                $ans = Read-Host "Apply swap to $($affected.Count) file(s)? [y/N]"
                 if ($ans -match '^[Yy]') {
-                    Invoke-Action "write $newVer to $verPath" {
-                        $utf8NoBom = New-Object System.Text.UTF8Encoding $false
-                        [System.IO.File]::WriteAllText($verPath, "$newVer`n", $utf8NoBom)
-                    }
-                    if ($newVerDisp -ne $verDisp) {
-                        Invoke-Action "write $newVerDisp to $verDispPath" {
-                            $utf8NoBom = New-Object System.Text.UTF8Encoding $false
-                            [System.IO.File]::WriteAllText($verDispPath, "$newVerDisp`n", $utf8NoBom)
+                    foreach ($rel in $affected) {
+                        Invoke-Action "swap $ver -> $newVer in $rel" {
+                            $full       = Join-Path $repoRoot $rel
+                            $content    = Get-Content $full -Raw
+                            $newContent = [regex]::Replace($content, $verPattern, $newVer)
+                            $utf8NoBom  = New-Object System.Text.UTF8Encoding $false
+                            [System.IO.File]::WriteAllText($full, $newContent, $utf8NoBom)
                         }
-                        Invoke-Git add browser/config/version.txt browser/config/version_display.txt
-                    } else {
-                        Invoke-Git add browser/config/version.txt
                     }
+                    Invoke-Git add -- @affected
                     Invoke-Git commit -m "Update version to $newVer"
                     $versionChanged = $true
-                    Write-Done "Committed version swap."
+                    Write-Done "Committed version swap across $($affected.Count) file(s)."
                 } else {
                     Write-Info "Skipped version swap."
                 }
