@@ -58,6 +58,17 @@ function Write-Warn2($msg) { Write-Host "!!  $msg" -ForegroundColor Yellow }
 function Write-Done($msg) { Write-Host "OK  $msg" -ForegroundColor Green }
 function Write-Dry($msg)  { Write-Host "DRY: $msg" -ForegroundColor DarkYellow }
 
+# Quote a single argument so it survives copy-paste into PowerShell (or
+# bash). Returns the arg unquoted if it only contains shell-safe chars,
+# otherwise wraps it in single quotes, doubling any embedded single
+# quotes (PowerShell single-quote escape).
+function Format-ShellArg([string]$s) {
+    if ($s.Length -gt 0 -and $s -match '^[A-Za-z0-9_./:=@\\-]+$') {
+        return $s
+    }
+    return "'" + ($s -replace "'", "''") + "'"
+}
+
 # ----- one mutating-git helper -----
 # Honors $script:DryRun. Throws on non-zero exit unless -AllowFail; in
 # that case the caller inspects $LASTEXITCODE.
@@ -68,7 +79,8 @@ function Invoke-Git {
         [switch]$AllowFail
     )
     if ($script:DryRun) {
-        Write-Dry ("git " + ($GitArgs -join ' '))
+        $quoted = ($GitArgs | ForEach-Object { Format-ShellArg $_ }) -join ' '
+        Write-Dry "git $quoted"
         $global:LASTEXITCODE = 0
         return
     }
@@ -414,13 +426,15 @@ $conflictBlock
         "--label",     $label
     )
 
+    $quotedGh = ($ghArgs | ForEach-Object { Format-ShellArg $_ }) -join ' '
     if ($SkipPR) {
         Write-Step "Skipping PR creation (-SkipPR)"
         Write-Host "Run this when ready:"
-        Write-Host "  gh $($ghArgs -join ' ')"
-        Write-Host "Body file: $bodyFile"
+        Write-Host "  gh $quotedGh"
+        Write-Host "Body file (kept for the command above): $bodyFile"
+        Remove-Item $stateFile -ErrorAction SilentlyContinue
     } else {
-        Invoke-Action ("gh " + ($ghArgs -join ' ')) {
+        Invoke-Action "gh $quotedGh" {
             Write-Step "Creating PR via gh"
             $prUrl = & gh @ghArgs
             if ($LASTEXITCODE -ne 0) {
