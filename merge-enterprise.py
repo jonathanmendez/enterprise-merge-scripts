@@ -473,7 +473,7 @@ class Merger:
         if self.state.get("prBranch"):
             step(f"Reusing PR branch from state: {self.state['prBranch']}")
             return self.state["prBranch"]
-        today = datetime.now().strftime("%Y%m%d")
+        today = datetime.now(timezone.utc).strftime("%Y%m%d")
         prefix = f"{self.branch}-merge_{today}"
         step(f"Determining next PR suffix for {prefix}")
         heads = self._git_lines(

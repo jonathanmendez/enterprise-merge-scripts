@@ -355,7 +355,7 @@ try {
         $prBranch = $state.prBranch
         Write-Step "Reusing PR branch from state: $prBranch"
     } else {
-        $today  = (Get-Date).ToString("yyyyMMdd")
+        $today  = (Get-Date).ToUniversalTime().ToString("yyyyMMdd")
         $prefix = "$Branch-merge_$today"
         Write-Step "Determining next PR suffix for $prefix"
         $heads = Get-Git -Lines ls-remote --heads $OriginRemote "$prefix*"
