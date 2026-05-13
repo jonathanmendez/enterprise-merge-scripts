@@ -148,8 +148,10 @@ try {
         }
     }
 
-    if (-not (Get-Command gh -ErrorAction SilentlyContinue)) {
-        throw "gh (GitHub CLI) is required. Install: winget install --id GitHub.cli"
+    if (-not $SkipPR) {
+        if (-not (Get-Command gh -ErrorAction SilentlyContinue)) {
+            throw "gh (GitHub CLI) is required. Install: winget install --id GitHub.cli"
+        }
     }
 
     $entBranchLocal = "enterprise-$Branch"

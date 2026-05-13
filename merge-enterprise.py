@@ -184,7 +184,7 @@ class Merger:
             if rc != 0:
                 raise MergeError(f"Git remote '{r}' not found.")
 
-        if shutil.which("gh") is None:
+        if not self.skip_pr and shutil.which("gh") is None:
             raise MergeError(
                 "gh (GitHub CLI) is required. Install: https://cli.github.com/"
             )
