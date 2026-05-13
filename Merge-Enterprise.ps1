@@ -344,6 +344,24 @@ try {
         }
     }
 
+    # ----- step 7.5: short-circuit if nothing changed -----
+    # If HEAD is still at the pre-merge SHA, the merge was a no-op and
+    # nothing else (l10n, version swap) produced a commit -- there's no
+    # point pushing or opening a PR. Skipped in dry-run because the merge
+    # wasn't actually attempted.
+    if (-not $DryRun) {
+        $currentSha = (Get-Git rev-parse HEAD).Trim()
+        if ($currentSha -eq $state.preMergeSha) {
+            Write-Step "No new commits since pre-merge state; skipping push and PR"
+            Write-Info "upstream/$Branch was already fully merged and no l10n updates were needed."
+            Remove-Item $stateFile -ErrorAction SilentlyContinue
+            Write-Step "Summary"
+            Write-Host "  Branch:  $Branch"
+            Write-Host "  Status:  no-op"
+            return
+        }
+    }
+
     # ----- step 8: main-only push -----
     if ($Branch -eq "main") {
         Write-Step "Pushing $UpstreamRemote/main -> ${EnterpriseRemote}:main"

@@ -158,11 +158,33 @@ class Merger:
         self._step5_l10n()
         version_changed = self._step6_version_swap()
         tc_changed = self._step7_taskcluster_check()
+        if self._is_noop():
+            return
         self._step8_main_push()
         pr_branch = self._step9_pr_branch_name()
         self._step10_push_pr_branch(pr_branch)
         self._step11_open_pr(pr_branch)
         self._summary(pr_branch, version_changed, tc_changed)
+
+    def _is_noop(self) -> bool:
+        """If HEAD is still at the pre-merge SHA, the merge was a no-op
+        and l10n/version-swap produced nothing -- skip push and PR.
+        Always returns False in --dry-run since no real merge happened."""
+        if self.dry_run:
+            return False
+        current_sha = self._git_out("rev-parse", "HEAD")
+        if current_sha != self.state["preMergeSha"]:
+            return False
+        step("No new commits since pre-merge state; skipping push and PR")
+        info(
+            f"upstream/{self.branch} was already fully merged and no "
+            "l10n updates were needed."
+        )
+        self._unlink_quiet(self.state_file)
+        step("Summary")
+        print(f"  Branch:  {self.branch}")
+        print(f"  Status:  no-op")
+        return True
 
     def _preflight(self):
         try:
