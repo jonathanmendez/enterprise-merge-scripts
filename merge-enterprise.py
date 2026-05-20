@@ -130,6 +130,15 @@ class Merger:
         out = self._git_out(*args, allow_fail=allow_fail)
         return out.splitlines() if out else []
 
+    def _git_check(self, *args) -> int:
+        """Read-only git that returns the exit code, suppressing stdout
+        and stderr. For verifications whose failure mode is signalled by
+        a non-zero exit (rev-parse --verify, merge-base --is-ancestor,
+        remote get-url). Always runs, even in --dry-run."""
+        return subprocess.run(
+            ["git", *args], capture_output=True, text=True
+        ).returncode
+
     def _action(self, description, fn):
         """Non-git mutation. Honors --dry-run."""
         if self.dry_run:
@@ -200,11 +209,7 @@ class Merger:
         self.state_file = git_dir / "enterprise-merge-state.json"
 
         for r in (self.enterprise_remote, self.upstream_remote, self.origin_remote):
-            rc = subprocess.run(
-                ["git", "remote", "get-url", r],
-                capture_output=True, text=True,
-            ).returncode
-            if rc != 0:
+            if self._git_check("remote", "get-url", r) != 0:
                 raise MergeError(f"Git remote '{r}' not found.")
 
         if not self.skip_pr and shutil.which("gh") is None:
@@ -296,22 +301,14 @@ class Merger:
     def _step4_merge(self) -> bool:
         """Returns False on conflict (state saved, caller exits)."""
         if self.tag:
-            rc = subprocess.run(
-                ["git", "rev-parse", "--verify", "--quiet",
-                 f"refs/tags/{self.tag}"],
-                capture_output=True, text=True,
-            ).returncode
-            if rc != 0:
+            if self._git_check("rev-parse", "--verify", "--quiet",
+                               f"refs/tags/{self.tag}") != 0:
                 raise MergeError(
                     f"Tag '{self.tag}' not found locally (did the fetch include tags?)."
                 )
-            rc = subprocess.run(
-                ["git", "merge-base", "--is-ancestor",
-                 f"refs/tags/{self.tag}",
-                 f"{self.upstream_remote}/{self.branch}"],
-                capture_output=True, text=True,
-            ).returncode
-            if rc != 0:
+            if self._git_check("merge-base", "--is-ancestor",
+                               f"refs/tags/{self.tag}",
+                               f"{self.upstream_remote}/{self.branch}") != 0:
                 raise MergeError(
                     f"Tag '{self.tag}' is not reachable from "
                     f"{self.upstream_remote}/{self.branch}."
