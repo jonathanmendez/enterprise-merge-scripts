@@ -26,11 +26,17 @@
 .PARAMETER SkipPR
   Do everything except 'gh pr create'. Prints the gh command and leaves
   the PR body file in place so you can run it manually.
+.PARAMETER Tag
+  Merge a specific tag instead of the tip of upstream/<branch>. The tag
+  must be an ancestor of upstream/<branch>. PR branch/title/body use the
+  tag in place of the date-based suffix.
 
 .EXAMPLE
   Merge-Enterprise.ps1 -Branch main
 .EXAMPLE
   Merge-Enterprise.ps1 -Branch main -Resume
+.EXAMPLE
+  Merge-Enterprise.ps1 -Branch release -Tag FIREFOX_150_0_2_BUILD2
 #>
 [CmdletBinding()]
 param(
@@ -41,6 +47,7 @@ param(
     [switch]$Resume,
     [switch]$DryRun,
     [switch]$SkipPR,
+    [string]$Tag = "",
 
     [string]$EnterpriseRemote = "enterprise",
     [string]$UpstreamRemote   = "upstream",
@@ -168,6 +175,17 @@ try {
         if ($state.branch -ne $Branch) {
             throw "State file is for branch '$($state.branch)', not '$Branch'."
         }
+        $stateTag = if ($state.PSObject.Properties.Name -contains 'tag') { $state.tag } else { $null }
+        if ($Tag) {
+            if (-not $stateTag) {
+                throw "State was created without a tag, but -Tag '$Tag' was given. Drop -Tag to resume, or delete state to start over."
+            }
+            if ($stateTag -ne $Tag) {
+                throw "State was created with -Tag '$stateTag', but -Tag '$Tag' was given."
+            }
+        } elseif ($stateTag) {
+            $Tag = $stateTag
+        }
         $currentRef = (Get-Git rev-parse --abbrev-ref HEAD).Trim()
         if ($currentRef -ne $entBranchLocal) {
             throw "-Resume expects HEAD on '$entBranchLocal' but it is on '$currentRef'."
@@ -198,7 +216,11 @@ try {
     # ----- step 2: fetch -----
     if (-not $Resume) {
         Write-Step "Fetching $UpstreamRemote and $EnterpriseRemote"
-        Invoke-Git fetch $UpstreamRemote
+        if ($Tag) {
+            Invoke-Git fetch --tags $UpstreamRemote
+        } else {
+            Invoke-Git fetch $UpstreamRemote
+        }
         Invoke-Git fetch $EnterpriseRemote
     }
 
@@ -211,11 +233,27 @@ try {
 
     # ----- step 4: merge -----
     if (-not $Resume) {
+        if ($Tag) {
+            Get-Git -AllowFail rev-parse --verify --quiet "refs/tags/$Tag" | Out-Null
+            if ($LASTEXITCODE -ne 0) {
+                throw "Tag '$Tag' not found locally (did the fetch include tags?)."
+            }
+            Get-Git -AllowFail merge-base --is-ancestor "refs/tags/$Tag" "$UpstreamRemote/$Branch" | Out-Null
+            if ($LASTEXITCODE -ne 0) {
+                throw "Tag '$Tag' is not reachable from $UpstreamRemote/$Branch."
+            }
+            $mergeSource = "refs/tags/$Tag"
+            $mergeSourceDisplay = $Tag
+        } else {
+            $mergeSource = "$UpstreamRemote/$Branch"
+            $mergeSourceDisplay = $mergeSource
+        }
+
         $preMergeSha = (Get-Git rev-parse HEAD).Trim()
-        Write-Step "Merging $UpstreamRemote/$Branch into $entBranchLocal"
+        Write-Step "Merging $mergeSourceDisplay into $entBranchLocal"
         Write-Info "Pre-merge SHA: $preMergeSha"
 
-        Invoke-Git -AllowFail merge --no-edit "$UpstreamRemote/$Branch"
+        Invoke-Git -AllowFail merge --no-edit $mergeSource
         if ($LASTEXITCODE -eq 0) {
             $conflictFiles = @()
         } else {
@@ -231,6 +269,7 @@ try {
             preMergeSha = $preMergeSha
             conflicts   = @($conflictFiles)
             prBranch    = $null
+            tag         = if ($Tag) { $Tag } else { $null }
         }
         Invoke-Action "write merge state to $stateFile" {
             $utf8NoBom = New-Object System.Text.UTF8Encoding $false
@@ -372,6 +411,14 @@ try {
     if ($state.prBranch) {
         $prBranch = $state.prBranch
         Write-Step "Reusing PR branch from state: $prBranch"
+    } elseif ($Tag) {
+        $prBranch = "$Branch-merge_$Tag"
+        Write-Step "PR branch (tag-based): $prBranch"
+        $state.prBranch = $prBranch
+        Invoke-Action "persist prBranch=$prBranch to state file" {
+            $utf8NoBom = New-Object System.Text.UTF8Encoding $false
+            [System.IO.File]::WriteAllText($stateFile, ($state | ConvertTo-Json -Depth 5), $utf8NoBom)
+        }
     } else {
         $today  = (Get-Date).ToUniversalTime().ToString("yyyyMMdd")
         $prefix = "$Branch-merge_$today"
@@ -409,6 +456,11 @@ try {
 
     $suffix  = $prBranch -replace ("^" + [regex]::Escape($Branch) + "-merge_"), ""
     $prTitle = "Enterprise $Branch merge $suffix"
+    if ($Tag) {
+        $mergeSourceLabel = $Tag
+    } else {
+        $mergeSourceLabel = "$UpstreamRemote/$Branch"
+    }
 
     $conflicts = @($state.conflicts)
     if ($conflicts.Count -gt 0) {
@@ -424,7 +476,7 @@ try {
 ### Description
 
 Bugzilla: NO BUG$hardBreak
-Daily merge from ``$UpstreamRemote/$Branch`` to ``$entBranchLocal``
+Daily merge from ``$mergeSourceLabel`` to ``$entBranchLocal``
 
 $conflictBlock
 "@

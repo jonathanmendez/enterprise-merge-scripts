@@ -90,6 +90,7 @@ class Merger:
         self.resume = args.resume
         self.dry_run = args.dry_run
         self.skip_pr = args.skip_pr
+        self.tag = args.tag
         self.enterprise_remote = args.enterprise_remote
         self.upstream_remote = args.upstream_remote
         self.origin_remote = args.origin_remote
@@ -227,6 +228,20 @@ class Merger:
                 raise MergeError(
                     f"State file is for branch '{self.state['branch']}', not '{self.branch}'."
                 )
+            state_tag = self.state.get("tag")
+            if self.tag:
+                if not state_tag:
+                    raise MergeError(
+                        f"State was created without a tag, but --tag '{self.tag}' was given. "
+                        "Drop --tag to resume, or delete state to start over."
+                    )
+                if state_tag != self.tag:
+                    raise MergeError(
+                        f"State was created with --tag '{state_tag}', "
+                        f"but --tag '{self.tag}' was given."
+                    )
+            elif state_tag:
+                self.tag = state_tag
             current = self._git_out("rev-parse", "--abbrev-ref", "HEAD")
             if current != self.ent_branch_local:
                 raise MergeError(
@@ -263,7 +278,10 @@ class Merger:
         if self.resume:
             return
         step(f"Fetching {self.upstream_remote} and {self.enterprise_remote}")
-        self._git("fetch", self.upstream_remote)
+        if self.tag:
+            self._git("fetch", "--tags", self.upstream_remote)
+        else:
+            self._git("fetch", self.upstream_remote)
         self._git("fetch", self.enterprise_remote)
 
     # ----- step 3 -----
@@ -277,14 +295,38 @@ class Merger:
     # ----- step 4 -----
     def _step4_merge(self) -> bool:
         """Returns False on conflict (state saved, caller exits)."""
+        if self.tag:
+            rc = subprocess.run(
+                ["git", "rev-parse", "--verify", "--quiet",
+                 f"refs/tags/{self.tag}"],
+                capture_output=True, text=True,
+            ).returncode
+            if rc != 0:
+                raise MergeError(
+                    f"Tag '{self.tag}' not found locally (did the fetch include tags?)."
+                )
+            rc = subprocess.run(
+                ["git", "merge-base", "--is-ancestor",
+                 f"refs/tags/{self.tag}",
+                 f"{self.upstream_remote}/{self.branch}"],
+                capture_output=True, text=True,
+            ).returncode
+            if rc != 0:
+                raise MergeError(
+                    f"Tag '{self.tag}' is not reachable from "
+                    f"{self.upstream_remote}/{self.branch}."
+                )
+            merge_source = f"refs/tags/{self.tag}"
+            merge_display = self.tag
+        else:
+            merge_source = f"{self.upstream_remote}/{self.branch}"
+            merge_display = merge_source
+
         pre_merge_sha = self._git_out("rev-parse", "HEAD")
-        step(f"Merging {self.upstream_remote}/{self.branch} into {self.ent_branch_local}")
+        step(f"Merging {merge_display} into {self.ent_branch_local}")
         info(f"Pre-merge SHA: {pre_merge_sha}")
 
-        rc = self._git(
-            "merge", "--no-edit", f"{self.upstream_remote}/{self.branch}",
-            allow_fail=True,
-        )
+        rc = self._git("merge", "--no-edit", merge_source, allow_fail=True)
         if rc == 0:
             conflicts = []
         else:
@@ -300,6 +342,7 @@ class Merger:
             "preMergeSha": pre_merge_sha,
             "conflicts": conflicts,
             "prBranch": None,
+            "tag": self.tag or None,
         }
         self._action(f"write merge state to {self.state_file}", self._save_state)
 
@@ -495,21 +538,25 @@ class Merger:
         if self.state.get("prBranch"):
             step(f"Reusing PR branch from state: {self.state['prBranch']}")
             return self.state["prBranch"]
-        today = datetime.now(timezone.utc).strftime("%Y%m%d")
-        prefix = f"{self.branch}-merge_{today}"
-        step(f"Determining next PR suffix for {prefix}")
-        heads = self._git_lines(
-            "ls-remote", "--heads", self.origin_remote, f"{prefix}*"
-        )
-        pat = re.compile(r"refs/heads/" + re.escape(prefix) + r"(\d{2})$")
-        used = []
-        for line in heads:
-            m = pat.search(line)
-            if m:
-                used.append(int(m.group(1)))
-        nn = max(used) + 1 if used else 0
-        pr_branch = f"{prefix}{nn:02d}"
-        info(f"PR branch: {pr_branch}")
+        if self.tag:
+            pr_branch = f"{self.branch}-merge_{self.tag}"
+            step(f"PR branch (tag-based): {pr_branch}")
+        else:
+            today = datetime.now(timezone.utc).strftime("%Y%m%d")
+            prefix = f"{self.branch}-merge_{today}"
+            step(f"Determining next PR suffix for {prefix}")
+            heads = self._git_lines(
+                "ls-remote", "--heads", self.origin_remote, f"{prefix}*"
+            )
+            pat = re.compile(r"refs/heads/" + re.escape(prefix) + r"(\d{2})$")
+            used = []
+            for line in heads:
+                m = pat.search(line)
+                if m:
+                    used.append(int(m.group(1)))
+            nn = max(used) + 1 if used else 0
+            pr_branch = f"{prefix}{nn:02d}"
+            info(f"PR branch: {pr_branch}")
         self.state["prBranch"] = pr_branch
         self._action(
             f"persist prBranch={pr_branch} to state file",
@@ -535,6 +582,7 @@ class Merger:
 
         suffix = re.sub(rf"^{re.escape(self.branch)}-merge_", "", pr_branch)
         pr_title = f"Enterprise {self.branch} merge {suffix}"
+        merge_source_label = self.tag if self.tag else f"{self.upstream_remote}/{self.branch}"
 
         conflicts = self.state.get("conflicts") or []
         if conflicts:
@@ -548,7 +596,7 @@ class Merger:
             "### Description\n"
             "\n"
             "Bugzilla: NO BUG  \n"
-            f"Daily merge from `{self.upstream_remote}/{self.branch}` to "
+            f"Daily merge from `{merge_source_label}` to "
             f"`{self.ent_branch_local}`\n"
             "\n"
             f"{conflict_block}\n"
@@ -642,6 +690,9 @@ def parse_args(argv):
                    help="print mutating commands without running them")
     p.add_argument("--skip-pr", action="store_true",
                    help="do everything except 'gh pr create'; print the gh command")
+    p.add_argument("--tag", default="",
+                   help="merge a specific tag instead of upstream/<branch>; "
+                        "tag must be an ancestor of upstream/<branch>")
     p.add_argument("--enterprise-remote", default="enterprise")
     p.add_argument("--upstream-remote", default="upstream")
     p.add_argument("--origin-remote", default="origin")
