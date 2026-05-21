@@ -4,6 +4,12 @@ Automation for the Firefox Enterprise daily-merge and train-promotion workflows.
 Drives `git`, syncs the enterprise l10n file, and opens PRs via `gh`. Halts cleanly
 on conflicts; resumes after manual resolution.
 
+## Disclaimer
+
+The scripts were created with guidance by claude in the pursuit of automating happy paths and common pitfalls.
+No effort has been made to make the code clean and readable, and only limited effort has been put toward robustness
+(I feel confident in being able to reset the state of my git repo if something goes wrong). Use at your own risk.
+
 ## Files
 
 | File | Purpose |
