@@ -619,7 +619,7 @@ def parse_args(argv):
     p.add_argument("--skip-pr", action="store_true",
                    help="do everything except the final 'gh pr create' for the promotion PR; "
                         "the two step-1 PRs are always created")
-    p.add_argument("--enterprise-remote", default="enterprise")
+    p.add_argument("--enterprise-remote", default="enterprise-firefox")
     p.add_argument("--upstream-remote", default="upstream")
     p.add_argument("--origin-remote", default="origin")
     p.add_argument("--enterprise-repo", default="mozilla/enterprise-firefox")
