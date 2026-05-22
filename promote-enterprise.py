@@ -284,12 +284,11 @@ class Promoter(GitOps):
         # commit we want was made directly on <upstream-dest> after the
         # promotion merge, which lies on the ancestry path.
         configs_shas = self._git_lines(
-            "log",
+            "rev-list",
             f"refs/tags/{self.dest_tag}..{self.upstream_remote}/{self.upstream_dest}",
             "--ancestry-path",
             "--grep", CONFIGS_COMMIT_MESSAGE,
             "-F",
-            "--format=%H",
         )
         if not configs_shas:
             raise MergeError(
@@ -455,7 +454,7 @@ class Promoter(GitOps):
         # -x appends a "(cherry picked from commit <sha>)" trailer so
         # _head_is_cherry_pick_of can detect a completed cherry-pick on
         # --continue.
-        rc = self._git("cherry-pick", "-x", configs_sha, allow_fail=True)
+        rc = self._git("cherry-pick", "-X", "theirs", "-x", configs_sha, allow_fail=True)
         if rc != 0:
             conflicts = self._git_lines("diff", "--name-only", "--diff-filter=U")
             warn(f"`git cherry-pick -x {configs_sha[:12]}` had conflicts:")
