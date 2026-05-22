@@ -214,7 +214,7 @@ class Merger(GitOps):
     directly for its step 1a/1b."""
 
     def __init__(self, *, branch, tag="", resume=False, dry_run=False,
-                 skip_pr=False, enterprise_remote="enterprise",
+                 skip_pr=False, enterprise_remote="enterprise-firefox",
                  upstream_remote="upstream", origin_remote="origin",
                  enterprise_repo="mozilla/enterprise-firefox",
                  pending_items_url=PENDING_ITEMS_URL,
