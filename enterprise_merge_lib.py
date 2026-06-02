@@ -256,7 +256,6 @@ class Merger(GitOps):
         tc_changed = self._step7_taskcluster_check()
         if self._is_noop():
             return
-        self._step8_main_push()
         pr_branch = self._step9_pr_branch_name()
         self._step10_push_pr_branch(pr_branch)
         self._step11_open_pr(pr_branch)
@@ -534,18 +533,6 @@ class Merger(GitOps):
                 "ping relduty after the PR merges."
             )
         return tc
-
-    # ----- step 8 -----
-    def _step8_main_push(self):
-        if self.branch != "main":
-            return
-        step(
-            f"Pushing {self.upstream_remote}/main -> {self.enterprise_remote}:main"
-        )
-        self._git(
-            "push", self.enterprise_remote,
-            f"{self.upstream_remote}/main:main",
-        )
 
     # ----- step 9 -----
     def _step9_pr_branch_name(self) -> str:
