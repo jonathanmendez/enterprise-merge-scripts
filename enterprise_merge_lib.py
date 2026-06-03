@@ -251,11 +251,11 @@ class Merger(GitOps):
         if not self.resume:
             if not self._step4_merge():
                 return  # conflict -- caller checks state_file presence
+        if self._is_noop():
+            return
         self._step5_l10n()
         version_changed = self._step6_version_swap()
         tc_changed = self._step7_taskcluster_check()
-        if self._is_noop():
-            return
         pr_branch = self._step9_pr_branch_name()
         self._step10_push_pr_branch(pr_branch)
         self._step11_open_pr(pr_branch)
