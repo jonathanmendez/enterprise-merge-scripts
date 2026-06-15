@@ -274,15 +274,15 @@ class Promoter(GitOps):
                 raise MergeError(f"Tag '{tag}' is not an ancestor of {ref}.")
             info(f"Ancestry: {tag} is an ancestor of {ref}  (OK)")
 
-        # --ancestry-path restricts to commits that are both descendants
-        # of <dest-tag> and ancestors of upstream/<upstream-dest> -- i.e.
-        # commits made directly on the dest line of history. Without it,
-        # the range pulls in older "Update configs" commits inherited
-        # from the source branch's history via the promotion merge (note
-        # that Lando's merge_onto pattern in step 2 inverts first-parent
-        # direction, so --first-parent here doesn't help). The configs
-        # commit we want was made directly on <upstream-dest> after the
-        # promotion merge, which lies on the ancestry path.
+        # --ancestry-path restricts to commits that are both descendants of
+        # <dest-tag> and ancestors of upstream/<upstream-dest> -- i.e. the
+        # configs commit made directly on the dest line after the promotion
+        # merge, excluding older "Update configs" commits inherited from the
+        # source branch via the merge's second parent. In normal operation
+        # this yields exactly one result. More than one only happens when
+        # upstream redid merge day (each redone "Promote" merge brings the
+        # superseded attempt's configs commit in as a second parent, all of
+        # which lie on an ancestry path), so we ask the user to disambiguate.
         configs_shas = self._git_lines(
             "rev-list",
             f"refs/tags/{self.dest_tag}..{self.upstream_remote}/{self.upstream_dest}",
@@ -295,17 +295,44 @@ class Promoter(GitOps):
                 f"Could not find a commit with message {CONFIGS_COMMIT_MESSAGE!r} "
                 f"in {self.upstream_remote}/{self.upstream_dest} after {self.dest_tag}."
             )
-        if len(configs_shas) > 1:
-            raise MergeError(
-                f"Found {len(configs_shas)} commits matching {CONFIGS_COMMIT_MESSAGE!r} "
-                f"in {self.upstream_remote}/{self.upstream_dest} after {self.dest_tag}; "
-                f"expected exactly one. SHAs: {', '.join(configs_shas)}"
-            )
         cached = self.state.get("configs_sha")
-        if cached and cached != configs_shas[0]:
-            warn(f"configs_sha changed since previous run: {cached} -> {configs_shas[0]}")
-        self.state["configs_sha"] = configs_shas[0]
+        if len(configs_shas) == 1:
+            chosen = configs_shas[0]
+        elif cached and cached in configs_shas:
+            info(f"Multiple configs commits found; reusing cached choice {cached}.")
+            chosen = cached
+        else:
+            chosen = self._choose_configs_sha(configs_shas)
+        if cached and cached != chosen:
+            warn(f"configs_sha changed since previous run: {cached} -> {chosen}")
+        self.state["configs_sha"] = chosen
         info(f"Configs commit: {self.state['configs_sha']}")
+
+    def _choose_configs_sha(self, candidates):
+        """Prompt the user to pick the correct "Update configs" commit when
+        the search returns several -- which only happens when upstream redid
+        merge day. The commit on the dest branch's first-parent line (the
+        attempt that became the tip) is flagged as the likely choice."""
+        first_parent = set(self._git_lines(
+            "rev-list", "--first-parent",
+            f"refs/tags/{self.dest_tag}..{self.upstream_remote}/{self.upstream_dest}",
+        ))
+        warn(
+            f"Found {len(candidates)} commits matching {CONFIGS_COMMIT_MESSAGE!r} "
+            f"after {self.dest_tag} (upstream likely redid merge day):"
+        )
+        for i, sha in enumerate(candidates, 1):
+            meta = self._git_out("show", "-s", "--format=%ci  %s", sha, allow_fail=True)
+            hint = "  <- on first-parent line (likely correct)" if sha in first_parent else ""
+            print(f"  [{i}] {sha}  {meta}{hint}")
+        while True:
+            ans = input("Enter the number or a unique SHA prefix (Ctrl+C to abort): ").strip()
+            if ans.isdigit() and 1 <= int(ans) <= len(candidates):
+                return candidates[int(ans) - 1]
+            matches = [s for s in candidates if s.startswith(ans)] if ans else []
+            if len(matches) == 1:
+                return matches[0]
+            warn("Invalid selection; try again.")
 
     # ----- step 1a / 1b -----
 
