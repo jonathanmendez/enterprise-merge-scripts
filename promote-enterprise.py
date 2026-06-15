@@ -258,10 +258,8 @@ class Promoter(GitOps):
                 )
             info(f"Version check: {self.enterprise_remote}/{self.ent_src} is at {ent_src_ver}  (OK)")
 
-        # 0c: ancestry checks and configs-commit search.
-        if self.dry_run:
-            dry("verify upstream tag ancestry and locate configs commit")
-            return
+        # 0c: ancestry checks and configs-commit search. These are all
+        # read-only git queries, so they also run in --dry-run
         for tag, ref in (
             (self.dest_tag, f"{self.upstream_remote}/{self.upstream_dest}"),
             (self.src_tag,  f"{self.upstream_remote}/{self.upstream_src}"),
