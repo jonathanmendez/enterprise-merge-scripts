@@ -178,18 +178,20 @@ def update_l10n_revisions(ops: GitOps, upstream_remote: str) -> int:
         indent, old_rev, suffix = m.group(1), m.group(2), m.group(3)
         up_entry = upstream.get(locale)
         if not up_entry:
-            warn(f"Locale '{locale}' not present in upstream; skipping.")
-            continue
+            raise MergeError(
+                f"Locale '{locale}' not present in upstream; skipping."
+            )
         new_rev = up_entry.get("revision")
         if not new_rev:
-            warn(f"Locale '{locale}' has no revision in upstream; skipping.")
-            continue
+            raise MergeError(
+                f"Locale '{locale}' has no revision in upstream; skipping."
+            )
         if new_rev != old_rev:
             print(f"  {locale}: {old_rev} -> {new_rev}")
             lines[i] = f'{indent}"revision": "{new_rev}"{suffix}'
             changed += 1
     if locale_idx != len(locales):
-        warn(
+        raise MergeError(
             f"Found {locale_idx} 'revision' lines but {len(locales)} locales "
             "in JSON; file may be malformed."
         )
