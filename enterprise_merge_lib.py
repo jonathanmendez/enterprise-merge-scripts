@@ -118,7 +118,12 @@ class GitOps:
 
     def _git_lines(self, *args, allow_fail=False) -> list:
         out = self._git_out(*args, allow_fail=allow_fail)
-        return out.splitlines() if out else []
+        if not out:
+            return []
+        lines = out.splitlines()
+        if args and args[0] == "status":
+            lines = [line for line in lines if not line.startswith("?? ")]
+        return lines
 
     def _git_check(self, *args) -> int:
         """Read-only git that returns the exit code, suppressing output.
