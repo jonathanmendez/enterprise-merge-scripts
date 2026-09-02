@@ -6,7 +6,8 @@ Imported by merge-enterprise.py and promote-enterprise.py. Provides:
   - color/log helpers (step, info, warn, done, dry)
   - the MergeError exception
   - the GitOps mixin (_git/_git_out/_git_lines/_git_check/_action)
-  - module-level unlink_quiet, save_json, update_l10n_revisions
+  - module-level unlink_quiet, save_json, update_l10n_revisions,
+    update_comm_revisions
   - the Merger class (also invokable as a library from promote)
 """
 
@@ -36,6 +37,16 @@ VERSION_FILES = [
 
 ENT_L10N_REL = "browser/locales/enterprise-l10n-changesets.json"
 UPSTREAM_L10N_REL = "browser/locales/l10n-changesets.json"
+
+TASKCLUSTER_YML_REL = ".taskcluster.yml"
+
+# Prefixes of the pinned Thunderbird revision keys in .taskcluster.yml. Each
+# has a matching <key>RepoUrl to resolve <key>Rev against.
+COMM_PIN_KEYS = ("commBase", "commHead")
+
+# Kept on its own commit, with this exact subject, so that a broken pin can be
+# found and reverted without touching the rest of the merge.
+COMM_PIN_COMMIT_SUBJECT = "Update .taskcluster.yml pinned Thunderbird revisions"
 
 
 # ----- Color output -------------------------------------------------
@@ -204,6 +215,75 @@ def update_l10n_revisions(ops: GitOps, upstream_remote: str) -> int:
     return changed
 
 
+def update_comm_revisions(ops: GitOps, branch: str, write: bool = True) -> list:
+    """Repin commBaseRev/commHeadRev in .taskcluster.yml to the tip of the
+    matching thunderbird-desktop branch, preserving original formatting
+    (minimal diff).
+
+    Each revision is resolved with `git ls-remote` against its own
+    commBaseRepoUrl/commHeadRepoUrl, using refs/heads/<branch>: that is how
+    .taskcluster.yml's commBaseRef/commHeadRef switch maps enterprise-<branch>
+    onto thunderbird-desktop. Returns a list of (key, old, new) tuples for the
+    revisions that changed (caller decides whether to git add + commit).
+
+    With write=False the revisions are still resolved and reported but the
+    file is left alone, so --dry-run can show the revisions it would pin.
+    Requires ops.repo_root and ops._git_out."""
+    path = ops.repo_root / TASKCLUSTER_YML_REL
+    original = path.read_text(encoding="utf-8")
+    lines = original.split("\n")
+
+    ref = f"refs/heads/{branch}"
+    changes = []
+
+    for key in COMM_PIN_KEYS:
+        url_pat = re.compile(rf"^\s+{key}RepoUrl:\s+(\S+)\s*$")
+        rev_pat = re.compile(rf"^(\s+){key}Rev:\s+([0-9a-fA-F]+)(.*)$")
+
+        url = next((m.group(1) for m in map(url_pat.match, lines) if m), None)
+        rev_idx = next(
+            (i for i, line in enumerate(lines) if rev_pat.match(line)), None
+        )
+
+        if url is None and rev_idx is None:
+            # This branch has not adopted pinning yet.
+            info(f"No {key}RepoUrl/{key}Rev in {TASKCLUSTER_YML_REL}; skipping.")
+            continue
+        if url is None or rev_idx is None:
+            raise MergeError(
+                f"{TASKCLUSTER_YML_REL} has one of {key}RepoUrl/{key}Rev but not "
+                "the other; file may be malformed."
+            )
+
+        out = ops._git_out("ls-remote", url, ref)
+        if not out.strip():
+            raise MergeError(f"{ref} does not exist in {url}")
+        new_rev = out.split()[0]
+
+        m = rev_pat.match(lines[rev_idx])
+        indent, old_rev, suffix = m.group(1), m.group(2), m.group(3)
+        if new_rev == old_rev:
+            continue
+        print(f"  {key}Rev: {old_rev} -> {new_rev}")
+        lines[rev_idx] = f"{indent}{key}Rev: {new_rev}{suffix}"
+        changes.append((key, old_rev, new_rev))
+
+    if not changes:
+        info("No comm revision updates needed.")
+        return changes
+
+    if not write:
+        dry(f"update {len(changes)} comm revision(s) in {TASKCLUSTER_YML_REL}")
+        return changes
+
+    new_content = "\n".join(lines)
+    if not new_content.endswith("\n"):
+        new_content += "\n"
+    path.write_text(new_content, encoding="utf-8", newline="\n")
+    info(f"Updated {len(changes)} comm revision(s) in {TASKCLUSTER_YML_REL}")
+    return changes
+
+
 # ===================================================================
 # Merger -- daily-merge orchestration
 # ===================================================================
@@ -254,6 +334,7 @@ class Merger(GitOps):
         if self._is_noop():
             return
         self._step5_l10n()
+        self._step5b_comm_pin()
         version_changed = self._step6_version_swap()
         tc_changed = self._step7_taskcluster_check()
         pr_branch = self._step9_pr_branch_name()
@@ -461,6 +542,32 @@ class Merger(GitOps):
             done("Committed l10n revision update.")
         else:
             info("No l10n revision changes.")
+
+    # ----- step 5b -----
+    def _step5b_comm_pin(self):
+        step(
+            f"Repinning Thunderbird revisions in {TASKCLUSTER_YML_REL} "
+            f"to thunderbird-desktop/{self.branch}"
+        )
+        # Not wrapped in _action: the revisions are resolved even under
+        # --dry-run so the run reports what it would pin. Only the write is
+        # suppressed.
+        changes = update_comm_revisions(self, self.branch, write=not self.dry_run)
+        if not changes:
+            info("No comm revision changes.")
+            return
+        if self.dry_run:
+            dry(f"'git add' + 'git commit' {TASKCLUSTER_YML_REL}")
+            return
+        details = "\n".join(f"{key}Rev: {old} -> {new}" for key, old, new in changes)
+        self._git("add", "--", TASKCLUSTER_YML_REL)
+        self._git(
+            "commit",
+            "-m", COMM_PIN_COMMIT_SUBJECT,
+            "-m", f"Pinned to thunderbird-desktop refs/heads/{self.branch}.\n\n{details}",
+            "-m", "Revert this commit alone to restore the previous pinned revisions.",
+        )
+        done("Committed comm revision pin update.")
 
     # ----- step 6 -----
     def _step6_version_swap(self) -> bool:
