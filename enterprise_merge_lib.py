@@ -639,7 +639,7 @@ class Merger(GitOps):
         if tc:
             warn(
                 ".taskcluster.yml changed in this merge -- "
-                "ping relduty after the PR merges."
+                "cron job should re-generate action hooks"
             )
         return tc
 
@@ -770,11 +770,6 @@ class Merger(GitOps):
             warn("  Version was swapped to xxx.y.0; verify before merging.")
         if tc_changed:
             warn(
-                "  .taskcluster.yml changed -- after PR merges, ping "
-                "relduty in #releaseduty:"
-            )
-            warn(
-                "    'rebuild hooks after a change to the "
-                "enterprise-firefox .taskcluster.yml'"
+                "  .taskcluster.yml changed -- cron job should rebuild hooks"
             )
         print("  Next:      assign reviewers, watch CI, then merge in the GitHub UI.")
