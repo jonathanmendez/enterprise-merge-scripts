@@ -509,6 +509,31 @@ class Merger(GitOps):
         self._action(f"write merge state to {self.state_file}", self._save_state)
 
         if conflicts:
+            # A release candidate merge always conflicts on the version files: the
+            # enterprise branch carries its swapped X.N.0 while upstream
+            # bumped to X.0.M, so both sides changed the same line. When
+            # those are the *only* conflicts, take upstream's value and
+            # let step 6 perform the X.0.M -> X.M.0 swap.
+            if self.branch == "release" and set(conflicts) <= set(VERSION_FILES):
+                ver_line = re.compile(r"^\d+\.\d+(\.\d+)?([ab]\d+)?$")
+                def _non_version(blob):
+                    return [l for l in blob.splitlines()
+                            if not ver_line.match(l.strip())]
+                only_version = all(
+                    _non_version(self._git_out("show", f":2:{f}"))
+                    == _non_version(self._git_out("show", f":3:{f}"))
+                    for f in conflicts
+                )
+                if only_version:
+                    step(f"Only version lines conflicted ({len(conflicts)}); "
+                         f"taking upstream, step 6 will swap")
+                    self._git("checkout", "--theirs", "--", *conflicts)
+                    self._git("add", "--", *conflicts)
+                    self._git("commit", "--no-edit")
+                    done("Merge completed; version files auto-resolved.")
+                    return True
+                warn("Version files carry non-version changes; "
+                     "resolve manually.")
             warn(f"Merge produced {len(conflicts)} conflict(s):")
             for f in conflicts:
                 print(f"      {f}")
