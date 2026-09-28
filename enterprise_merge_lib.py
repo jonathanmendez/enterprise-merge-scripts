@@ -147,6 +147,20 @@ class GitOps:
             return None
         return fn()
 
+class MachOps:
+    """Mixin providing mach helpers. Requires self.repo_root, since mach
+    is not on PATH: it is the ./mach script at the top of the checkout."""
+
+    def _mach(self, *args, allow_fail=False):
+        mach = str(self.repo_root / "mach")
+        if self.dry_run:
+            dry("./mach " + " ".join(a for a in args))
+            return 0
+        rc = subprocess.run([mach, *args]).returncode
+        if rc != 0 and not allow_fail:
+            raise MergeError(f"./mach {' '.join(args)} failed (exit {rc})")
+        return rc
+
 
 def update_l10n_revisions(ops: GitOps, upstream_remote: str) -> int:
     """Sync `revision` of every locale in the enterprise l10n file from
@@ -290,7 +304,7 @@ def update_comm_revisions(ops: GitOps, branch: str, write: bool = True) -> list:
 # Merger -- daily-merge orchestration
 # ===================================================================
 
-class Merger(GitOps):
+class Merger(GitOps, MachOps):
     """Drive one daily merge (or tag-pinned merge) from upstream into
     enterprise-<branch>. Importable; promote-enterprise.py uses this
     directly for its step 1a/1b."""
@@ -342,6 +356,7 @@ class Merger(GitOps):
         pr_branch = self._step9_pr_branch_name()
         self._step10_push_pr_branch(pr_branch)
         self._step11_open_pr(pr_branch)
+        self._step12_push_try(pr_branch)
         self._summary(pr_branch, version_changed, tc_changed)
 
     def _is_noop(self) -> bool:
@@ -759,6 +774,13 @@ class Merger(GitOps):
             print("-----")
             print(body)
             print("-----")
+
+    def _step12_push_try(self, pr_branch):
+        step(f"Checking out {pr_branch}")
+        self._git("switch", "-c", pr_branch, self.ent_branch_local)
+        self._mach("try", "fuzzy", "-q", "\'marionette-enterprise | \'xpcshell")
+        self._git("switch", self.ent_branch_local)
+        self._git("branch", "-D", pr_branch)
 
     # ----- summary -----
     def _summary(self, pr_branch, version_changed, tc_changed):
