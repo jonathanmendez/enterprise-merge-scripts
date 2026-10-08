@@ -161,6 +161,24 @@ class MachOps:
             raise MergeError(f"./mach {' '.join(args)} failed (exit {rc})")
         return rc
 
+    def _push_try(self, *, local_branch, temp_branch):
+        """Push a try run for the current tip of `local_branch`.
+
+        `mach try` labels the push with the checked-out branch name, so the
+        run is made from a throwaway branch named after the PR branch -- that
+        is what reviewers see on Treeherder. The branch is removed afterwards,
+        including when the push fails, so a resumed run starts clean.
+        """
+        step(f"Pushing to try from {temp_branch}")
+        self._git("switch", local_branch)
+        self._git("branch", "-D", temp_branch, allow_fail=True)
+        self._git("switch", "-c", temp_branch, local_branch)
+        try:
+            self._mach("try", "fuzzy", "-q", "'marionette-enterprise | 'xpcshell | 'rusttests | linux-opt-enterprise-end2end")
+        finally:
+            self._git("switch", local_branch)
+            self._git("branch", "-D", temp_branch, allow_fail=True)
+
 
 def update_l10n_revisions(ops: GitOps, upstream_remote: str) -> int:
     """Sync `revision` of every locale in the enterprise l10n file from
@@ -801,11 +819,7 @@ class Merger(GitOps, MachOps):
             print("-----")
 
     def _step12_push_try(self, pr_branch):
-        step(f"Checking out {pr_branch}")
-        self._git("switch", "-c", pr_branch, self.ent_branch_local)
-        self._mach("try", "fuzzy", "-q", "\'marionette-enterprise | \'xpcshell | \'rusttests | linux-opt-enterprise-end2end")
-        self._git("switch", self.ent_branch_local)
-        self._git("branch", "-D", pr_branch)
+        self._push_try(local_branch=self.ent_branch_local, temp_branch=pr_branch)
 
     # ----- summary -----
     def _summary(self, pr_branch, version_changed, tc_changed):
