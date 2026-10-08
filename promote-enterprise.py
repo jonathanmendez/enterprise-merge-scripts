@@ -37,7 +37,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from enterprise_merge_lib import (
-    GitOps, Merger, MergeError,
+    GitOps, MachOps, Merger, MergeError,
     PENDING_ITEMS_URL, VERSION_FILES, ENT_L10N_REL,
     step, info, warn, done, dry,
     save_json, unlink_quiet, update_l10n_revisions,
@@ -55,10 +55,11 @@ PHASE_ORDER = [
     "step_2_configs",
     "step_2_cherry",
     "step_2_finish",
+    "step_2_try",
 ]
 
 
-class Promoter(GitOps):
+class Promoter(GitOps, MachOps):
     """Drive one promotion of enterprise-<src> to enterprise-<dest>."""
 
     def __init__(self, args):
@@ -85,6 +86,7 @@ class Promoter(GitOps):
         self.previous_version = self.version - 1
         self.ent_src = f"enterprise-{self.upstream_src}"
         self.ent_dest = f"enterprise-{self.upstream_dest}"
+        self.pr_branch = f"promote-{self.promoted_version}-{self.upstream_dest}"
         dest_up = self.upstream_dest.upper()
         self.src_tag = f"FIREFOX_{dest_up}_{self.promoted_version}_BASE"
         self.dest_tag = f"FIREFOX_{dest_up}_{self.previous_version}_END"
@@ -134,6 +136,7 @@ class Promoter(GitOps):
             ("step_2_configs",  self._do_step_2_configs),
             ("step_2_cherry",   self._do_step_2_cherry),
             ("step_2_finish",   self._do_step_2_finish),
+            ("step_2_try",      self._do_step_2_try),
         ]
         try:
             start_idx = next(
@@ -518,7 +521,7 @@ class Promoter(GitOps):
                 info("No l10n revision changes.")
 
         # 2l: push and PR.
-        pr_branch = f"promote-{self.promoted_version}-{self.upstream_dest}"
+        pr_branch = self.pr_branch
         step(f"Step 2l: push {self.ent_dest} -> {self.origin_remote}:{pr_branch}")
         self._git(
             "push", self.origin_remote,
@@ -585,6 +588,16 @@ class Promoter(GitOps):
             print("-----")
             print(body)
             print("-----")
+
+    def _do_step_2_try(self):
+        """Step 2m: push a try run for the promoted branch.
+
+        Runs after the PR step, as in merge-enterprise, and also under
+        --skip-pr: the try results are useful whether or not the PR exists
+        yet.
+        """
+        step(f"Step 2m: push {self.ent_dest} to try")
+        self._push_try(local_branch=self.ent_dest, temp_branch=self.pr_branch)
 
     # ----- helpers -----
 
