@@ -7,7 +7,8 @@ Imported by merge-enterprise.py and promote-enterprise.py. Provides:
   - the MergeError exception
   - the GitOps mixin (_git/_git_out/_git_lines/_git_check/_action)
   - module-level unlink_quiet, save_json, update_l10n_revisions,
-    update_comm_revisions
+    update_comm_revisions, parse_upstream_revision, phabricator_token,
+    conduit, conduit_search, fetch_phabricator_stack
   - the Merger class (also invokable as a library from promote)
 """
 
@@ -19,6 +20,9 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import urllib.error
+import urllib.parse
+import urllib.request
 import webbrowser
 from datetime import datetime, timezone
 from pathlib import Path
@@ -47,6 +51,20 @@ COMM_PIN_KEYS = ("commBase", "commHead")
 # Kept on its own commit, with this exact subject, so that a broken pin can be
 # found and reverted without touching the rest of the merge.
 COMM_PIN_COMMIT_SUBJECT = "Update .taskcluster.yml pinned Thunderbird revisions"
+
+# Enterprise PRs carrying this label adapt to an upstream change, and should
+# be merged once that change reaches upstream main.
+UPSTREAM_CHANGES_LABEL = "upstream-changes"
+
+LANDO_URL = "https://lando.moz.tools"
+
+# Conduit endpoint; also the .arcrc host key moz-phab stores its token under.
+PHABRICATOR_API_URL = "https://phabricator.services.mozilla.com/api/"
+
+# Line in an upstream-changes PR description (from the PR template) linking
+# the Lando page of the revision (or the first revision of a stack) it
+# depends on, e.g. https://lando.moz.tools/D12345/.
+UPSTREAM_REV_LINE = re.compile(r"Upstream Lando link:(.*)", re.I)
 
 
 # ----- Color output -------------------------------------------------
@@ -300,6 +318,125 @@ def update_comm_revisions(ops: GitOps, branch: str, write: bool = True) -> list:
     return changes
 
 
+def parse_upstream_revision(body):
+    """Return the numeric Phabricator revision id from the
+    'Upstream Lando link:' line of a PR description, or None. Accepts a
+    Lando (or Phabricator) URL for the revision, or a bare D12345."""
+    # The template's placeholder comment holds an example link; drop it so
+    # an unfilled line isn't read as D12345.
+    body = re.sub(r"<!--.*?-->", "", body or "", flags=re.S)
+    m = UPSTREAM_REV_LINE.search(body)
+    if not m:
+        return None
+    # Only D<number>: other Lando URLs (e.g. /landings/<job id>/) carry
+    # numbers that aren't revision ids.
+    m = re.search(r"\bD(\d+)\b", m.group(1))
+    return int(m.group(1)) if m else None
+
+
+def phabricator_token():
+    """moz-phab's Conduit API token for PHABRICATOR_API_URL, or None.
+    Looked up the way moz-phab does (mozphab/conduit.py load_api_token,
+    mozphab/helpers.py get_arcrc_path): $MOZPHAB_PHABRICATOR_API_TOKEN,
+    then .arcrc in %APPDATA% on Windows or the home directory elsewhere."""
+    token = os.environ.get("MOZPHAB_PHABRICATOR_API_TOKEN")
+    if token:
+        return token
+    if sys.platform == "win32":
+        arcrc_path = Path(os.environ.get("APPDATA", "")) / ".arcrc"
+    else:
+        arcrc_path = Path.home() / ".arcrc"
+    try:
+        arcrc = json.loads(arcrc_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return arcrc.get("hosts", {}).get(PHABRICATOR_API_URL, {}).get("token") or None
+
+
+def conduit(token, method, params) -> dict:
+    """Call a Phabricator Conduit API method. Raises MergeError with a
+    short reason on failure."""
+    data = urllib.parse.urlencode({
+        "params": json.dumps({**params, "__conduit__": {"token": token}}),
+        "output": "json",
+    }).encode()
+    try:
+        with urllib.request.urlopen(PHABRICATOR_API_URL + method, data,
+                                    timeout=30) as r:
+            out = json.load(r)
+    except urllib.error.HTTPError as e:
+        raise MergeError(f"Conduit {method}: HTTP {e.code}")
+    except (urllib.error.URLError, OSError, ValueError) as e:
+        raise MergeError(f"Conduit {method}: {getattr(e, 'reason', e)}")
+    if out.get("error_code"):
+        # Token errors quote the token back; keep it out of the output.
+        error = str(out.get("error_info")).replace(token, "<token>")
+        raise MergeError(f"Conduit {method}: {error}")
+    return out["result"]
+
+
+def conduit_search(token, method, params) -> list:
+    """Call a paginated Conduit *.search method; returns all result rows."""
+    rows, after = [], None
+    while True:
+        page = {**params, "limit": 100}
+        if after:
+            page["after"] = after
+        result = conduit(token, method, page)
+        rows += result["data"]
+        after = result.get("cursor", {}).get("after")
+        if not after:
+            return rows
+
+
+def fetch_phabricator_stack(token, revision_id) -> dict:
+    """Every revision in the Phabricator stack containing D<revision_id>,
+    as {revision id: {"status": status value, e.g. "published",
+    "commits": [landed commit SHAs]}}. Phabricator links a revision to
+    each commit landed for it (relandings included). Raises MergeError
+    with a short reason on failure."""
+    found = conduit_search(token, "differential.revision.search",
+                           {"constraints": {"ids": [revision_id]}})
+    if not found:
+        raise MergeError(f"D{revision_id} not found in Phabricator")
+
+    # Walk parent/child edges until no new revisions turn up.
+    phids = {found[0]["phid"]}
+    frontier = set(phids)
+    while frontier:
+        edges = conduit_search(token, "edge.search", {
+            "sourcePHIDs": sorted(frontier),
+            "types": ["revision.parent", "revision.child"],
+        })
+        frontier = {e["destinationPHID"] for e in edges} - phids
+        phids |= frontier
+
+    revisions = conduit_search(token, "differential.revision.search",
+                               {"constraints": {"phids": sorted(phids)}})
+    commit_edges = conduit_search(token, "edge.search", {
+        "sourcePHIDs": sorted(phids), "types": ["revision.commit"],
+    })
+    commit_phids = sorted({e["destinationPHID"] for e in commit_edges})
+    shas = {}
+    if commit_phids:
+        shas = {
+            c["phid"]: c["fields"]["identifier"]
+            for c in conduit_search(token, "diffusion.commit.search",
+                                    {"constraints": {"phids": commit_phids}})
+        }
+
+    stack = {}
+    for rev in revisions:
+        stack[rev["id"]] = {
+            "status": rev["fields"]["status"]["value"],
+            "commits": [
+                shas[e["destinationPHID"]] for e in commit_edges
+                if e["sourcePHID"] == rev["phid"] and e["destinationPHID"] in shas
+            ],
+        }
+    return stack
+
+
 # ===================================================================
 # Merger -- daily-merge orchestration
 # ===================================================================
@@ -344,6 +481,7 @@ class Merger(GitOps, MachOps):
         self._step1_pending_items()
         self._step2_fetch()
         self._step3_checkout_pull()
+        self._step3b_upstream_changes_prs()
         if not self.resume:
             if not self._step4_merge():
                 return  # conflict -- caller checks state_file presence
@@ -476,6 +614,145 @@ class Merger(GitOps, MachOps):
         step(f"Checking out {self.ent_branch_local}")
         self._git("switch", self.ent_branch_local)
         self._git("pull", "--ff-only", self.enterprise_remote, self.ent_branch_local)
+
+    # ----- step 3b -----
+    def _step3b_upstream_changes_prs(self):
+        """Best-effort check of open upstream-changes PRs: any whose upstream
+        revision has reached upstream main should be merged before this
+        merge. Lists them and lets the user abort to merge them first."""
+        if self.resume or self.branch != "main":
+            return
+        step(f"Checking open '{UPSTREAM_CHANGES_LABEL}' PRs in {self.enterprise_repo}")
+        if shutil.which("gh") is None:
+            warn("gh not found; skipping the upstream-changes PR check.")
+            return
+        r = subprocess.run(
+            ["gh", "pr", "list",
+             "--repo", self.enterprise_repo,
+             "--label", UPSTREAM_CHANGES_LABEL,
+             "--state", "open",
+             "--limit", "100",
+             "--json", "url,body"],
+            capture_output=True, text=True, encoding="utf-8",
+        )
+        if r.returncode != 0:
+            warn(f"gh pr list failed (exit {r.returncode}); skipping the "
+                 f"upstream-changes PR check: {r.stderr.strip()}")
+            return
+        prs = json.loads(r.stdout)
+        if not prs:
+            info(f"No open '{UPSTREAM_CHANGES_LABEL}' PRs.")
+            return
+
+        token = phabricator_token()
+        if token is None:
+            warn(f"No Phabricator API token for {PHABRICATOR_API_URL} in .arcrc "
+                 "or $MOZPHAB_PHABRICATOR_API_TOKEN; run 'moz-phab install-certificate' "
+                 "to check upstream status.")
+
+        rows = []
+        for pr in prs:
+            rev = parse_upstream_revision(pr["body"])
+            if rev is None:
+                rows.append((pr["url"], "inspect", "unknown (no Lando link in PR description)", "-"))
+                continue
+            if token is None:
+                action, status = "inspect", "unknown (no Phabricator API token)"
+            else:
+                action, status = self._upstream_change_status(token, rev)
+            rows.append((pr["url"], action, status, f"{LANDO_URL}/D{rev}/"))
+
+        headers = ("PR", "Action", "Status", "Lando")
+        widths = [max(len(row[i]) for row in (headers, *rows)) for i in range(len(headers))]
+        for row in (headers, tuple("-" * w for w in widths), *rows):
+            print("    " + "  ".join(c.ljust(w) for c, w in zip(row, widths)).rstrip())
+        print()
+
+        actionable = [row for row in rows if row[1] != "skip"]
+        if not actionable:
+            done("No upstream-changes PRs need merging.")
+            return
+        warn(f"{len(actionable)} upstream-changes PR(s) may need merging before this merge.")
+        info("'merge':   upstream stack is on upstream main; merge the PR first.")
+        info("'inspect': stack is partially on main or its status is unknown; check manually.")
+        info("To merge them first: abort, merge the PRs, then re-run this script "
+             f"(it re-syncs {self.ent_branch_local}).")
+        if self.dry_run:
+            dry("prompt to continue the merge or abort")
+            return
+        ans = input("Continue with the merge anyway? [y/N]: ").strip()
+        if not ans.lower().startswith("y"):
+            raise MergeError(
+                "Aborted to handle upstream-changes PRs. Merge them, then re-run."
+            )
+
+    def _upstream_change_status(self, token, revision_id):
+        """Returns (action, status) for an upstream-changes PR that depends
+        on the stack containing D<revision_id>. The PR depends on the whole
+        stack, so every (non-abandoned) revision in it is checked: "merge"
+        if all are on upstream main, "skip" if none are, and "inspect" for
+        a mixed state or any revision that can't be resolved."""
+        try:
+            stack = fetch_phabricator_stack(token, revision_id)
+        except MergeError as e:
+            return "inspect", f"unknown ({e})"
+
+        states = {
+            rev: self._revision_state(info)
+            for rev, info in sorted(stack.items())
+            if info["status"] != "abandoned"
+        }
+        if not states:
+            return "skip", "abandoned"
+
+        def summarize(revs):
+            if len(states) == 1:
+                return states[revs[0]]
+            return ", ".join(f"D{r}: {states[r]}" for r in revs)
+
+        unknown = [r for r, s in states.items() if s.startswith("unknown")]
+        on_main = [r for r, s in states.items() if s == "landed"]
+        off_main = [r for r in states if r not in on_main]
+        if unknown:
+            return "inspect", summarize(unknown)
+        if not off_main:
+            return "merge", "landed" if len(states) == 1 else f"landed ({len(states)} revisions)"
+        if not on_main:
+            if len(set(states.values())) == 1:
+                return "skip", states[off_main[0]]
+            return "skip", summarize(off_main)
+        return "inspect", f"partially landed ({summarize(off_main)})"
+
+    def _revision_state(self, revision) -> str:
+        """Where a revision from fetch_phabricator_stack stands relative to
+        upstream main: "landed" (on main, not backed out), "backed out",
+        "landed (not yet on main)", "not yet landed", or "unknown (...)".
+        Phabricator supplies the landed commits; git decides whether they
+        reached upstream main and whether they were since backed out."""
+        commits = revision["commits"]
+        if not commits:
+            if revision["status"] == "published":
+                # Closed in Phabricator, but no commit linked to check in git.
+                return "unknown (closed with no landed commit)"
+            return "not yet landed"
+
+        upstream_main = f"{self.upstream_remote}/main"
+        on_main = [
+            sha for sha in commits
+            if self._git_check("merge-base", "--is-ancestor", sha, upstream_main) == 0
+        ]
+        if not on_main:
+            return "landed (not yet on main)"
+        # A revision backed out and relanded has several commits; it is on
+        # main if any of them stands.
+        for sha in on_main:
+            subjects = self._git_lines(
+                "log", "--format=%s", "-F", f"--grep={sha[:12]}",
+                f"{sha}..{upstream_main}",
+            )
+            if not any(re.match(r"(Revert|Backed out)", s, re.I) for s in subjects):
+                return "landed"
+        return "backed out"
 
     # ----- step 4 -----
     def _step4_merge(self) -> bool:
