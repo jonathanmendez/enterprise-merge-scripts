@@ -23,6 +23,10 @@ No effort has been made to make the code clean and readable, and only limited ef
 - Python 3.8+
 - `git`
 - [`gh`](https://cli.github.com/), authenticated via `gh auth login`
+- For the `upstream-changes` PR check: a Phabricator API token, as set up by
+  `moz-phab install-certificate`. It's found the same way moz-phab finds it:
+  `$MOZPHAB_PHABRICATOR_API_TOKEN`, else `%APPDATA%\.arcrc` on Windows or
+  `~/.arcrc` on macOS/Linux. Without one the check marks every PR `inspect`.
 - Three git remotes (names overridable via flags):
   - `upstream` — `mozilla-firefox/firefox`
   - `enterprise-firefox` — `mozilla/enterprise-firefox`
@@ -47,6 +51,21 @@ merge-enterprise.py --branch main --dry-run # preview without mutating
 merge-enterprise.py --branch main --resume  # after resolving conflicts
 merge-enterprise.py --branch release --tag FIREFOX_150_0_2_BUILD2  # tag-pinned
 ```
+
+For `--branch main`, after syncing and before merging, the script lists open
+`upstream-changes` PRs. For each one it reads the revision from the PR
+template's `Upstream Lando link: https://lando.moz.tools/D12345/` line. The PR is
+taken to depend on the whole stack containing that revision. The script asks
+Phabricator's Conduit API for every revision in the stack (except abandoned ones)
+and the commits landed for each, then checks those commits in git. It then
+recommends an action:
+
+- `merge`: every revision in the stack is on `upstream/main` and none was backed out, so merge the PR first.
+- `skip`: no revision in the stack is on main yet (not landed, still on autoland, or backed out).
+- `inspect`: the stack is partly on main, e.g. one revision was backed out, or a revision's status couldn't be determined. Check by hand.
+
+If any PR is `merge` or `inspect`, you're asked whether to continue. Abort, merge
+the PRs, then re-run; the re-run re-syncs `enterprise-main`.
 
 On conflict the script prints the files, exits, and tells you to commit and
 re-run with `--resume`. PR title/body/label match the existing convention; you
