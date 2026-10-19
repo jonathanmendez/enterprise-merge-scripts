@@ -805,7 +805,7 @@ class Merger(GitOps, MachOps):
     def _step12_push_try(self, pr_branch):
         step(f"Checking out {pr_branch}")
         self._git("switch", "-c", pr_branch, self.ent_branch_local)
-        self._mach("try", "fuzzy", "-q", "\'marionette-enterprise | \'xpcshell | \'rusttests | linux-opt-enterprise-end2end")
+        self._mach("try", "fuzzy", "-q", "\'marionette-enterprise | \'xpcshell | \'rusttests | linux-opt-enterprise-end2end | \'build")
         self._git("switch", self.ent_branch_local)
         self._git("branch", "-D", pr_branch)
 
