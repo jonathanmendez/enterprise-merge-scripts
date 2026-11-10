@@ -67,6 +67,7 @@ class Promoter(GitOps):
         self.resume = args.resume  # the --continue flag
         self.dry_run = args.dry_run
         self.skip_pr = args.skip_pr
+        self.pr_url = None
         self.enterprise_remote = args.enterprise_remote
         self.upstream_remote = args.upstream_remote
         self.origin_remote = args.origin_remote
@@ -576,7 +577,8 @@ class Promoter(GitOps):
                     f"State file preserved at {self.state_file}; "
                     "resolve and re-run with --continue."
                 )
-            done(f"PR opened: {r.stdout.strip()}")
+            self.pr_url = r.stdout.strip()
+            done(f"PR opened: {self.pr_url}")
             unlink_quiet(body_path)
 
         self._action(f"gh {quoted_gh}", do_gh)
@@ -622,6 +624,8 @@ class Promoter(GitOps):
         print(f"  src_tag:       {self.src_tag}")
         print(f"  dest_tag:      {self.dest_tag}")
         print(f"  configs_sha:   {self.state['configs_sha']}")
+        if self.pr_url:
+            print(f"  PR:            {self.pr_url}")
         print("  Next:          assign reviewers, watch CI, then merge the promotion PR.")
 
 

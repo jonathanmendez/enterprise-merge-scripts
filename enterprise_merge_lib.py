@@ -321,6 +321,7 @@ class Merger(GitOps, MachOps):
         self.resume = resume
         self.dry_run = dry_run
         self.skip_pr = skip_pr
+        self.pr_url = None
         self.tag = tag
         self.enterprise_remote = enterprise_remote
         self.upstream_remote = upstream_remote
@@ -791,7 +792,8 @@ class Merger(GitOps, MachOps):
                     f"State file preserved at {self.state_file}; "
                     "resolve and re-run with --resume."
                 )
-            done(f"PR opened: {r.stdout.strip()}")
+            self.pr_url = r.stdout.strip()
+            done(f"PR opened: {self.pr_url}")
             unlink_quiet(self.state_file)
             unlink_quiet(body_path)
 
@@ -815,6 +817,8 @@ class Merger(GitOps, MachOps):
         print(f"  Branch:    {self.branch}")
         print(f"  PR branch: {pr_branch}")
         print(f"  Conflicts: {len(self.state.get('conflicts') or [])}")
+        if self.pr_url:
+            print(f"  PR:        {self.pr_url}")
         if version_changed:
             warn("  Version was swapped to xxx.y.0; verify before merging.")
         if tc_changed:
